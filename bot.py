@@ -445,7 +445,7 @@ def api_data():
 
 
 def run_dashboard():
-    app.run(host="127.0.0.1", port=DASHBOARD_PORT, debug=False, use_reloader=False)
+   app.run(host="0.0.0.0", port=PORT)
 
 
 if __name__ == "__main__":
