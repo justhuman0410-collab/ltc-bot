@@ -6,76 +6,89 @@ import requests
 import discord
 from discord import app_commands, Embed
 from discord.ext import tasks
-from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template_string
 
-load_dotenv()
-
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-USER_ID = int(os.getenv("USER_ID"))
+USER_ID = int(os.getenv("USER_ID", "0"))
 LTC_ADDRESS = os.getenv("LTC_ADDRESS")
-CHECK_SECONDS = int(os.getenv("CHECK_SECONDS", "15"))
+CHECK_SECONDS = int(os.getenv("CHECK_SECONDS", "60"))
 MAX_CONFIRMATIONS_ALERT = int(os.getenv("MAX_CONFIRMATIONS_ALERT", "12"))
+BLOCKCYPHER_TOKEN = os.getenv("BLOCKCYPHER_TOKEN", "")
 PORT = int(os.getenv("PORT", "5000"))
 
 STATE_FILE = "bot_state.json"
-API_TOKEN = os.getenv("BLOCKCYPHER_TOKEN")
 
-BLOCKCYPHER_API = f"https://api.blockcypher.com/v1/ltc/main/addrs/{LTC_ADDRESS}/full?limit=10&token={API_TOKEN}"
+if not DISCORD_TOKEN:
+    raise RuntimeError("DISCORD_TOKEN missing")
+if USER_ID == 0:
+    raise RuntimeError("USER_ID missing")
+if not LTC_ADDRESS:
+    raise RuntimeError("LTC_ADDRESS missing")
+
+BLOCKCYPHER_API = (
+    f"https://api.blockcypher.com/v1/ltc/main/addrs/{LTC_ADDRESS}/full?limit=10"
+)
+if BLOCKCYPHER_TOKEN:
+    BLOCKCYPHER_API += f"&token={BLOCKCYPHER_TOKEN}"
 
 intents = discord.Intents.default()
+price_cache = {"value": 0.0, "last_update": 0}
 
-price_cache = {"value": 0, "last_update": 0}
 dashboard_data = {
     "address": LTC_ADDRESS,
-    "balance_ltc": 0,
-    "balance_usd": 0,
-    "ltc_price": 0,
-    "total_received": 0,
-    "total_sent": 0,
+    "balance_ltc": 0.0,
+    "balance_usd": 0.0,
+    "ltc_price": 0.0,
+    "total_received": 0.0,
+    "total_sent": 0.0,
     "last_check": "Never",
-    "recent_txs": []
+    "recent_txs": [],
+    "last_error": ""
 }
 
 
 def load_state():
-    if not os.path.exists(STATE_FILE):
-        return {"seen_txs": {}, "first_run": True}
-
     try:
-        with open(STATE_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {"seen_txs": {}, "first_run": True}
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE, "r") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {"seen_txs": {}, "first_run": True}
 
 
 def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=4)
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        print("State save error:", e)
 
 
 state = load_state()
 
 
 def ltc_from_satoshi(value):
-    return value / 100_000_000
+    return float(value or 0) / 100_000_000
 
 
 def get_ltc_price_usd():
-    if time.time() - price_cache["last_update"] < 60 and price_cache["value"] > 0:
+    if time.time() - price_cache["last_update"] < 120 and price_cache["value"] > 0:
         return price_cache["value"]
 
     try:
-        url = "https://api.coingecko.com/api/v3/simple/price"
-        params = {"ids": "litecoin", "vs_currencies": "usd"}
-        r = requests.get(url, params=params, timeout=10)
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": "litecoin", "vs_currencies": "usd"},
+            timeout=10
+        )
         r.raise_for_status()
-        price = r.json()["litecoin"]["usd"]
-
+        price = float(r.json()["litecoin"]["usd"])
         price_cache["value"] = price
         price_cache["last_update"] = time.time()
         return price
-    except:
+    except Exception as e:
+        print("Price error:", e)
         return price_cache["value"]
 
 
@@ -85,7 +98,7 @@ def get_wallet_data():
     return r.json()
 
 
-def get_received_amount_for_address(tx):
+def get_received_amount(tx):
     total = 0
     for output in tx.get("outputs", []):
         if LTC_ADDRESS in output.get("addresses", []):
@@ -93,7 +106,7 @@ def get_received_amount_for_address(tx):
     return ltc_from_satoshi(total)
 
 
-def get_sent_amount_from_address(tx):
+def get_sent_amount(tx):
     total = 0
     for inp in tx.get("inputs", []):
         if LTC_ADDRESS in inp.get("addresses", []):
@@ -105,7 +118,7 @@ def tx_link(tx_hash):
     return f"https://live.blockcypher.com/ltc/tx/{tx_hash}/"
 
 
-def update_dashboard_data(data):
+def update_dashboard(data):
     price = get_ltc_price_usd()
     balance_ltc = ltc_from_satoshi(data.get("balance", 0))
     total_received = ltc_from_satoshi(data.get("total_received", 0))
@@ -114,8 +127,8 @@ def update_dashboard_data(data):
     recent = []
     for tx in data.get("txs", [])[:10]:
         tx_hash = tx.get("hash", "")
-        received = get_received_amount_for_address(tx)
-        sent = get_sent_amount_from_address(tx)
+        received = get_received_amount(tx)
+        sent = get_sent_amount(tx)
         confirmations = tx.get("confirmations", 0)
 
         if received > 0:
@@ -126,7 +139,7 @@ def update_dashboard_data(data):
             amount = sent
         else:
             direction = "Other"
-            amount = 0
+            amount = 0.0
 
         recent.append({
             "hash": tx_hash,
@@ -146,7 +159,8 @@ def update_dashboard_data(data):
         "total_received": total_received,
         "total_sent": total_sent,
         "last_check": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "recent_txs": recent
+        "recent_txs": recent,
+        "last_error": ""
     })
 
 
@@ -168,13 +182,13 @@ client = LTCNotifier()
 async def on_ready():
     print(f"Logged in as {client.user}")
     print("LTC notifier is running.")
-    print(f"Dashboard: http://127.0.0.1:{DASHBOARD_PORT}")
+    print(f"Web server running on port {PORT}")
 
 
 @client.tree.command(name="addy", description="Show LTC wallet address")
 async def addy(interaction: discord.Interaction):
     await interaction.response.send_message(
-        f"📬 **Your LTC Address:**\n`{LTC_ADDRESS}`",
+        f"📬 **LTC Address:**\n`{LTC_ADDRESS}`",
         ephemeral=True
     )
 
@@ -185,7 +199,7 @@ async def balance(interaction: discord.Interaction):
 
     try:
         data = get_wallet_data()
-        update_dashboard_data(data)
+        update_dashboard(data)
 
         embed = Embed(title="💰 LTC Wallet Balance", color=0x00ff99)
         embed.add_field(
@@ -196,7 +210,6 @@ async def balance(interaction: discord.Interaction):
         embed.add_field(name="LTC Price", value=f"${dashboard_data['ltc_price']:.2f}", inline=True)
         embed.add_field(name="Total Received", value=f"{dashboard_data['total_received']:.8f} LTC", inline=True)
         embed.add_field(name="Total Sent", value=f"{dashboard_data['total_sent']:.8f} LTC", inline=True)
-        embed.add_field(name="Dashboard", value=f"http://127.0.0.1:{DASHBOARD_PORT}", inline=False)
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -210,7 +223,7 @@ async def history(interaction: discord.Interaction):
 
     try:
         data = get_wallet_data()
-        update_dashboard_data(data)
+        update_dashboard(data)
 
         if not dashboard_data["recent_txs"]:
             await interaction.followup.send("No recent transactions found.", ephemeral=True)
@@ -237,24 +250,24 @@ async def history(interaction: discord.Interaction):
 @client.tree.command(name="status", description="Show bot status")
 async def status(interaction: discord.Interaction):
     embed = Embed(title="✅ LTC Notifier Status", color=0x00ff99)
-    embed.add_field(name="Check Interval", value=f"{CHECK_SECONDS} seconds", inline=True)
+    embed.add_field(name="Check Interval", value=f"{CHECK_SECONDS}s", inline=True)
     embed.add_field(name="Max Confirmation Alerts", value=str(MAX_CONFIRMATIONS_ALERT), inline=True)
     embed.add_field(name="Tracked TXs", value=str(len(state.get("seen_txs", {}))), inline=True)
     embed.add_field(name="Last Check", value=dashboard_data["last_check"], inline=False)
-    embed.add_field(name="Dashboard", value=f"http://127.0.0.1:{DASHBOARD_PORT}", inline=False)
+    embed.add_field(name="Last Error", value=dashboard_data["last_error"] or "None", inline=False)
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@tasks.loop(seconds=15)
+@tasks.loop(seconds=60)
 async def check_wallet():
     try:
         data = get_wallet_data()
-        update_dashboard_data(data)
+        update_dashboard(data)
 
         user = await client.fetch_user(USER_ID)
-        seen_txs = state["seen_txs"]
-        ltc_price = get_ltc_price_usd()
+        seen_txs = state.setdefault("seen_txs", {})
+        price = get_ltc_price_usd()
 
         for tx in reversed(data.get("txs", [])):
             tx_hash = tx.get("hash")
@@ -263,12 +276,11 @@ async def check_wallet():
             if not tx_hash:
                 continue
 
-            received_amount = get_received_amount_for_address(tx)
-
+            received_amount = get_received_amount(tx)
             if received_amount <= 0:
                 continue
 
-            received_usd = received_amount * ltc_price
+            received_usd = received_amount * price
 
             if tx_hash not in seen_txs:
                 seen_txs[tx_hash] = confirmations
@@ -290,145 +302,97 @@ async def check_wallet():
                 embed.add_field(name="Confirmations", value=str(confirmations), inline=True)
                 embed.add_field(name="TX Hash", value=f"`{tx_hash}`", inline=False)
                 embed.add_field(name="TX Link", value=tx_link(tx_hash), inline=False)
-
                 await user.send(embed=embed)
 
-            else:
-                old_confirmations = seen_txs[tx_hash]
+            elif confirmations > seen_txs[tx_hash]:
+                seen_txs[tx_hash] = confirmations
+                save_state(state)
 
-                if confirmations > old_confirmations:
-                    seen_txs[tx_hash] = confirmations
-                    save_state(state)
-
-                    if confirmations <= MAX_CONFIRMATIONS_ALERT:
-                        embed = Embed(title="🔔 LTC Confirmation Update", color=0x3399ff)
-                        embed.add_field(
-                            name="Amount",
-                            value=f"{received_amount:.8f} LTC\n≈ ${received_usd:.2f} USD",
-                            inline=False
-                        )
-                        embed.add_field(name="Confirmations", value=f"**{confirmations}**", inline=True)
-                        embed.add_field(name="TX Hash", value=f"`{tx_hash}`", inline=False)
-                        embed.add_field(name="TX Link", value=tx_link(tx_hash), inline=False)
-
-                        await user.send(embed=embed)
+                if confirmations <= MAX_CONFIRMATIONS_ALERT:
+                    embed = Embed(title="🔔 LTC Confirmation Update", color=0x3399ff)
+                    embed.add_field(
+                        name="Amount",
+                        value=f"{received_amount:.8f} LTC\n≈ ${received_usd:.2f} USD",
+                        inline=False
+                    )
+                    embed.add_field(name="Confirmations", value=f"**{confirmations}**", inline=True)
+                    embed.add_field(name="TX Hash", value=f"`{tx_hash}`", inline=False)
+                    embed.add_field(name="TX Link", value=tx_link(tx_hash), inline=False)
+                    await user.send(embed=embed)
 
         if state.get("first_run", True):
             state["first_run"] = False
             save_state(state)
 
     except Exception as e:
+        dashboard_data["last_error"] = str(e)
         print("Wallet check error:", e)
 
 
 app = Flask(__name__)
 
-DASHBOARD_HTML = """
+HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>LTC Dashboard</title>
-    <meta http-equiv="refresh" content="10">
-    <style>
-        body {
-            background: #0f172a;
-            color: white;
-            font-family: Arial, sans-serif;
-            padding: 30px;
-        }
-        .card {
-            background: #111827;
-            border-radius: 14px;
-            padding: 20px;
-            margin-bottom: 20px;
-            box-shadow: 0 0 20px rgba(0,0,0,0.3);
-        }
-        .title {
-            font-size: 28px;
-            font-weight: bold;
-            margin-bottom: 10px;
-        }
-        .value {
-            font-size: 24px;
-            color: #22c55e;
-            font-weight: bold;
-        }
-        .small {
-            color: #9ca3af;
-            font-size: 14px;
-            word-break: break-all;
-        }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 15px;
-        }
-        th, td {
-            padding: 12px;
-            border-bottom: 1px solid #374151;
-            text-align: left;
-        }
-        a {
-            color: #60a5fa;
-        }
-        .received {
-            color: #22c55e;
-        }
-        .sent {
-            color: #ef4444;
-        }
-    </style>
+  <title>LTC Dashboard</title>
+  <meta http-equiv="refresh" content="15">
+  <style>
+    body { background:#0f172a; color:white; font-family:Arial; padding:30px; }
+    .card { background:#111827; border-radius:14px; padding:20px; margin-bottom:20px; }
+    .title { font-size:28px; font-weight:bold; margin-bottom:10px; }
+    .value { font-size:24px; color:#22c55e; font-weight:bold; }
+    .small { color:#9ca3af; font-size:14px; word-break:break-all; }
+    table { width:100%; border-collapse:collapse; margin-top:15px; }
+    th,td { padding:12px; border-bottom:1px solid #374151; text-align:left; }
+    a { color:#60a5fa; }
+    .Received { color:#22c55e; }
+    .Sent { color:#ef4444; }
+  </style>
 </head>
 <body>
-    <div class="title">💰 LTC Wallet Dashboard</div>
+  <div class="title">💰 LTC Wallet Dashboard</div>
 
-    <div class="card">
-        <div class="small">Wallet Address</div>
-        <div class="small">{{ data.address }}</div>
-    </div>
+  <div class="card">
+    <div class="small">Wallet Address</div>
+    <div class="small">{{ data.address }}</div>
+  </div>
 
-    <div class="card">
-        <div class="small">Current Balance</div>
-        <div class="value">{{ "%.8f"|format(data.balance_ltc) }} LTC</div>
-        <div class="value">${{ "%.2f"|format(data.balance_usd) }} USD</div>
-    </div>
+  <div class="card">
+    <div class="small">Current Balance</div>
+    <div class="value">{{ "%.8f"|format(data.balance_ltc) }} LTC</div>
+    <div class="value">${{ "%.2f"|format(data.balance_usd) }} USD</div>
+  </div>
 
-    <div class="card">
-        <div class="small">LTC Price</div>
-        <div class="value">${{ "%.2f"|format(data.ltc_price) }}</div>
-    </div>
+  <div class="card">
+    <div class="small">LTC Price</div>
+    <div class="value">${{ "%.2f"|format(data.ltc_price) }}</div>
+    <br>
+    <div class="small">Last Check: {{ data.last_check }}</div>
+    <div class="small">Last Error: {{ data.last_error or "None" }}</div>
+  </div>
 
-    <div class="card">
-        <div class="small">Total Received</div>
-        <div>{{ "%.8f"|format(data.total_received) }} LTC</div>
-        <br>
-        <div class="small">Total Sent</div>
-        <div>{{ "%.8f"|format(data.total_sent) }} LTC</div>
-        <br>
-        <div class="small">Last Check: {{ data.last_check }}</div>
-    </div>
-
-    <div class="card">
-        <div class="title">Recent Transactions</div>
-        <table>
-            <tr>
-                <th>Type</th>
-                <th>Amount</th>
-                <th>USD</th>
-                <th>Confirmations</th>
-                <th>TX</th>
-            </tr>
-            {% for tx in data.recent_txs %}
-            <tr>
-                <td class="{{ 'received' if tx.direction == 'Received' else 'sent' }}">{{ tx.direction }}</td>
-                <td>{{ "%.8f"|format(tx.amount_ltc) }} LTC</td>
-                <td>${{ "%.2f"|format(tx.amount_usd) }}</td>
-                <td>{{ tx.confirmations }}</td>
-                <td><a href="{{ tx.link }}" target="_blank">{{ tx.short_hash }}</a></td>
-            </tr>
-            {% endfor %}
-        </table>
-    </div>
+  <div class="card">
+    <div class="title">Recent Transactions</div>
+    <table>
+      <tr>
+        <th>Type</th>
+        <th>Amount</th>
+        <th>USD</th>
+        <th>Conf</th>
+        <th>TX</th>
+      </tr>
+      {% for tx in data.recent_txs %}
+      <tr>
+        <td class="{{ tx.direction }}">{{ tx.direction }}</td>
+        <td>{{ "%.8f"|format(tx.amount_ltc) }} LTC</td>
+        <td>${{ "%.2f"|format(tx.amount_usd) }}</td>
+        <td>{{ tx.confirmations }}</td>
+        <td><a href="{{ tx.link }}" target="_blank">{{ tx.short_hash }}</a></td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
 </body>
 </html>
 """
@@ -436,7 +400,12 @@ DASHBOARD_HTML = """
 
 @app.route("/")
 def dashboard():
-    return render_template_string(DASHBOARD_HTML, data=dashboard_data)
+    return render_template_string(HTML, data=dashboard_data)
+
+
+@app.route("/health")
+def health():
+    return "OK", 200
 
 
 @app.route("/api")
@@ -445,10 +414,10 @@ def api_data():
 
 
 def run_dashboard():
-   app.run(host="0.0.0.0", port=PORT)
+    print(f"Starting dashboard on port {PORT}")
+    app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
 
 
 if __name__ == "__main__":
-    print(f"Starting dashboard on port {PORT}")
     threading.Thread(target=run_dashboard, daemon=False).start()
     client.run(DISCORD_TOKEN)
