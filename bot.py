@@ -16,6 +16,7 @@ USER_ID = int(os.getenv("USER_ID"))
 LTC_ADDRESS = os.getenv("LTC_ADDRESS")
 CHECK_SECONDS = int(os.getenv("CHECK_SECONDS", "15"))
 MAX_CONFIRMATIONS_ALERT = int(os.getenv("MAX_CONFIRMATIONS_ALERT", "12"))
+PORT = int(os.getenv("PORT", "5000"))
 int(os.getenv("DASHBOARD_PORT", "5000"))
 
 STATE_FILE = "bot_state.json"
