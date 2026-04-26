@@ -447,5 +447,6 @@ def run_dashboard():
 
 
 if __name__ == "__main__":
-    threading.Thread(target=run_dashboard, daemon=True).start()
+    print(f"Starting dashboard on port {PORT}")
+    threading.Thread(target=run_dashboard, daemon=False).start()
     client.run(DISCORD_TOKEN)
