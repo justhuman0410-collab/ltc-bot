@@ -19,7 +19,9 @@ MAX_CONFIRMATIONS_ALERT = int(os.getenv("MAX_CONFIRMATIONS_ALERT", "12"))
 int(os.getenv("DASHBOARD_PORT", "5000"))
 
 STATE_FILE = "bot_state.json"
-BLOCKCYPHER_API = f"https://api.blockcypher.com/v1/ltc/main/addrs/{LTC_ADDRESS}/full?limit=10"
+API_TOKEN = os.getenv("BLOCKCYPHER_TOKEN")
+
+BLOCKCYPHER_API = f"https://api.blockcypher.com/v1/ltc/main/addrs/{LTC_ADDRESS}/full?limit=10&token={API_TOKEN}"
 
 intents = discord.Intents.default()
 
