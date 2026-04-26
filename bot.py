@@ -17,7 +17,6 @@ LTC_ADDRESS = os.getenv("LTC_ADDRESS")
 CHECK_SECONDS = int(os.getenv("CHECK_SECONDS", "15"))
 MAX_CONFIRMATIONS_ALERT = int(os.getenv("MAX_CONFIRMATIONS_ALERT", "12"))
 PORT = int(os.getenv("PORT", "5000"))
-int(os.getenv("DASHBOARD_PORT", "5000"))
 
 STATE_FILE = "bot_state.json"
 API_TOKEN = os.getenv("BLOCKCYPHER_TOKEN")
